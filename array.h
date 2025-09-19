@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdint>
 #include <functional>
 #include <memory>
 

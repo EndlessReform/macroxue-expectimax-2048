@@ -29,6 +29,8 @@ struct Options {
   int max_rank = 0;
   bool tuple_moves = true;
   double save_threshold = 0.1;
+  bool quiet = false;
+  int progress_interval = 100;
 };
 
 static Options options;
@@ -202,14 +204,19 @@ class Node : public Board {
     return total_score / empty_tiles;
   }
 
-  int TryAllMoves(int depth, float prob, int* best_move = nullptr) {
+  int TryAllMoves(int depth, float prob, int* best_move = nullptr,
+                  int move_scores[4] = nullptr) {
     int best_score = game_over_score;
+    if (move_scores) {
+      for (int i = 0; i < 4; ++i) move_scores[i] = game_over_score;
+    }
     if (best_move) *best_move = -1;
     for (int i = 0; i < 4; i++) {
       Node m = *this;
       if (!(m.*moves[i])()) continue;
 
       int score = m.TryAllTiles(depth - 1, prob);
+      if (move_scores) move_scores[i] = score;
       if (best_score == game_over_score || best_score < score) {
         best_score = score;
         if (best_move) *best_move = i;
@@ -218,7 +225,7 @@ class Node : public Board {
     return best_score;
   }
 
-  int Search(int depth, int* best_move) {
+  int Search(int depth, int* best_move, int move_scores[4] = nullptr) {
     int max_tile_score = TileScore(MaxRank());
     int score = Evaluate();
     if (options.tuple_moves) {
@@ -233,17 +240,16 @@ class Node : public Board {
       game_over_score = -1 << 22;
     }
     skip_cache = false;
-    auto h_score = TryAllMoves(depth, 1, best_move);
+    auto h_score = TryAllMoves(depth, 1, best_move, move_scores);
 #ifdef BIG_TUPLES
     if (h_score < 0) {
         pass_score = -INT_MAX;
         game_over_score = -1 << 22;
         skip_cache = true;
-        h_score = TryAllMoves(depth, 1, best_move);
+        h_score = TryAllMoves(depth, 1, best_move, move_scores);
     }
 #endif
     return h_score;
-    return TryAllMoves(depth, 1, best_move);
   }
 
   static void BuildScoreMap();

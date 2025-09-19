@@ -8,9 +8,12 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include <array>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -139,7 +142,32 @@ struct Valuation {
   float value;
 };
 
-Valuation SuggestMove(Node& n, int* m, bool lookup_only = false) {
+const char* ValuationTypeName(Valuation::Type type) {
+  switch (type) {
+    case Valuation::kTuple11:
+      return "tuple11";
+    case Valuation::kTuple10:
+      return "tuple10";
+    case Valuation::kLinePlan:
+      return "line_plan";
+    case Valuation::kBlockPlan:
+      return "block_plan";
+    case Valuation::kSearch:
+      return "search";
+    default:
+      return "invalid";
+  }
+}
+
+std::string FormatFloat(double value, int precision = 6) {
+  std::ostringstream oss;
+  oss.setf(std::ios::fixed, std::ios::floatfield);
+  oss << std::setprecision(precision) << value;
+  return oss.str();
+}
+
+Valuation SuggestMove(Node& n, int* m, bool lookup_only = false,
+                      int move_scores[4] = nullptr) {
   if (tuple11) {
     auto prob = tuple11->SuggestMove(n, m);
 #ifdef BIG_TUPLES
@@ -167,7 +195,8 @@ Valuation SuggestMove(Node& n, int* m, bool lookup_only = false) {
   if (lookup_only) {
     return {Valuation::kSearch, 0};
   }
-  return {Valuation::kSearch, (float)n.Search(options.max_depth, m)};
+  return {Valuation::kSearch,
+          (float)n.Search(options.max_depth, m, move_scores)};
 }
 
 float LookupTuple(Node &n, Valuation::Type type) {
@@ -390,9 +419,10 @@ int main(int argc, char* argv[]) {
   options.seed = time(nullptr);
   options.UpdateMinProbFromDepth();
   char* log_file = nullptr;
+  const char* json_log_path = nullptr;
   int server_port = 0;
   int c;
-  while ((c = getopt(argc, argv, "d:i:p:s:vIL:O:P:R:S:T")) != -1) {
+  while ((c = getopt(argc, argv, "d:i:p:s:vIL:O:P:R:S:TJ:qF:")) != -1) {
     switch (c) {
       case 'd':
         options.max_depth = atoi(optarg);
@@ -431,10 +461,26 @@ int main(int argc, char* argv[]) {
       case 'T':
         options.tuple_moves = false;
         break;
+      case 'J':
+        json_log_path = optarg;
+        break;
+      case 'q':
+        options.quiet = true;
+        break;
+      case 'F':
+        options.progress_interval = atoi(optarg);
+        break;
     }
   }
   if (optind < argc) options.seed = atoi(argv[optind]);
   srand(options.seed);
+
+  std::string json_base_path;
+  bool enable_json_logging = false;
+  if (json_log_path) {
+    json_base_path = json_log_path;
+    enable_json_logging = true;
+  }
 
   Node::BuildMoveMap();
   Node::BuildScoreMap();
@@ -458,6 +504,7 @@ int main(int argc, char* argv[]) {
   long sum_game_scores = 0;
   int max_rank_freq[N * N + 1];
   memset(max_rank_freq, 0, sizeof(max_rank_freq));
+  long long total_moves_logged = 0;
 
   for (int i = 0; i < options.iterations; ++i) {
     srand(options.seed + i);
@@ -481,17 +528,96 @@ int main(int argc, char* argv[]) {
     timeval start, finish;
     gettimeofday(&start, NULL);
 
+    std::ofstream step_log_stream;
+    std::string game_file_prefix;
+    std::string steps_file_path;
+    bool step_log_ready = false;
+    if (enable_json_logging) {
+      std::ostringstream path_builder;
+      path_builder << json_base_path << "_game" << std::setfill('0')
+                   << std::setw(6) << i;
+      game_file_prefix = path_builder.str();
+      steps_file_path = game_file_prefix + ".jsonl";
+      step_log_stream.open(steps_file_path, std::ios::out | std::ios::trunc);
+      if (!step_log_stream) {
+        fprintf(stderr, "Failed to open JSONL step log %s\n",
+                steps_file_path.c_str());
+      } else {
+        step_log_ready = true;
+      }
+    }
+
     int num_moves = 0;
     int prev_max_rank = 0;
     do {
-      if (options.verbose || options.interactive) n.Show();
+      if (!options.quiet && (options.verbose || options.interactive)) n.Show();
 
       int max_rank = n.MaxRank();
       if (max_rank == options.max_rank) break;
 
+      int move_scores[4] = {0, 0, 0, 0};
       int m;
-      auto valuation = SuggestMove(n, &m);
+      auto valuation = SuggestMove(n, &m, /*lookup_only=*/false,
+                                   step_log_ready ? move_scores : nullptr);
       auto prob = valuation.prob(max_rank);
+
+      if (step_log_ready && m >= 0) {
+        std::array<double, 4> branch_values = {0.0, 0.0, 0.0, 0.0};
+        std::array<bool, 4> branch_valid = {false, false, false, false};
+        if (valuation.type == Valuation::kTuple11 ||
+            valuation.type == Valuation::kTuple10) {
+          for (int move_idx = 0; move_idx < 4; ++move_idx) {
+            Node candidate = n;
+            if (!(candidate.*Node::moves[move_idx])()) continue;
+            branch_valid[move_idx] = true;
+            branch_values[move_idx] =
+                RollOutWithTuple(candidate, valuation.type);
+          }
+        } else {
+          for (int move_idx = 0; move_idx < 4; ++move_idx) {
+            Node candidate = n;
+            if (!(candidate.*Node::moves[move_idx])()) continue;
+            branch_valid[move_idx] = true;
+            branch_values[move_idx] = move_scores[move_idx] / 1000.0;
+          }
+        }
+
+        const int step_index = num_moves;
+        std::ostringstream line;
+        line << '{';
+        line << "\"seed\":" << options.seed + i << ',';
+        line << "\"depth\":" << options.max_depth << ',';
+        line << "\"game_index\":" << i << ',';
+        line << "\"step_index\":" << step_index << ',';
+        line << "\"max_rank\":" << max_rank << ',';
+        line << "\"move\":\"" << Board::move_names[m] << "\",";
+        line << "\"move_index\":" << m << ',';
+        line << "\"valuation_type\":\"" << ValuationTypeName(valuation.type)
+             << "\",";
+        line << "\"valuation\":" << FormatFloat(prob) << ',';
+        line << "\"board\":[";
+        bool first = true;
+        for (int y = 0; y < N; ++y) {
+          for (int x = 0; x < N; ++x) {
+            if (!first) line << ',';
+            line << n[x][y];
+            first = false;
+          }
+        }
+        line << "],";
+        line << "\"branch_evs\":{";
+        for (int move_idx = 0; move_idx < 4; ++move_idx) {
+          if (move_idx) line << ',';
+          line << "\"" << Board::move_names[move_idx] << "\":";
+          if (branch_valid[move_idx])
+            line << FormatFloat(branch_values[move_idx]);
+          else
+            line << "null";
+        }
+        line << "}";
+        line << '}';
+        step_log_stream << line.str() << '\n';
+      }
 
       if (options.interactive) num_moves -= InteractivePlay(&n, &m, prob);
 
@@ -501,12 +627,12 @@ int main(int argc, char* argv[]) {
       assert(moved);
       ++num_moves;
 
-      if (options.interactive) {
+      if (options.interactive && !options.quiet) {
         printf("#%d: %s\n", num_moves, Board::move_names[m]);
-      } else if (options.verbose) {
+      } else if (options.verbose && !options.quiet) {
         printf("#%d: %5s ", num_moves, Board::move_names[m]);
         valuation.Show(max_rank);
-      } else if (max_rank != prev_max_rank) {
+      } else if (!options.quiet && max_rank != prev_max_rank) {
         printf("\r%7d", Node::Tile(max_rank));
         fflush(stdout);
       }
@@ -515,17 +641,25 @@ int main(int argc, char* argv[]) {
 
     gettimeofday(&finish, NULL);
 
-    if (!options.verbose) {
+    if (!options.quiet && !options.verbose) {
       putchar('\r');
       n.Show();
     }
     auto seconds = Elapse(start, finish);
-    printf("game# %d moves %d seconds %.1f moves/s %.1f\n", options.seed + i,
-           num_moves, seconds, num_moves / seconds);
+    if (!options.quiet) {
+      printf("game# %d moves %d seconds %.1f moves/s %.1f\n", options.seed + i,
+             num_moves, seconds, num_moves / seconds);
+    }
 
-    sum_game_scores += n.GameScore();
-    ++max_rank_freq[n.MaxRank()];
-    if (options.iterations > 1) {
+    int final_game_score = n.GameScore();
+    int final_max_rank = n.MaxRank();
+    int final_max_tile = n.MaxTile();
+    int final_sum_tile = n.SumTile();
+
+    sum_game_scores += final_game_score;
+    ++max_rank_freq[final_max_rank];
+    total_moves_logged += num_moves;
+    if (!options.quiet && options.iterations > 1) {
       printf("%d-game average %ld max ", i + 1, sum_game_scores / (i + 1));
       for (int r = 0; r <= N * N; ++r)
         if (max_rank_freq[r])
@@ -533,8 +667,42 @@ int main(int argc, char* argv[]) {
                  100.0 * max_rank_freq[r] / (i + 1));
       puts("");
     }
-    if (options.verbose) Node::cache.ShowStats();
-    fflush(stdout);
+
+    if (step_log_ready) {
+      step_log_stream.close();
+      std::ofstream meta_stream(game_file_prefix + ".meta.json",
+                                std::ios::out | std::ios::trunc);
+      if (!meta_stream) {
+        fprintf(stderr, "Failed to write metadata for %s\n",
+                game_file_prefix.c_str());
+      } else {
+        meta_stream << '{';
+        meta_stream << "\"seed\":" << options.seed + i << ',';
+        meta_stream << "\"depth\":" << options.max_depth << ',';
+        meta_stream << "\"game_index\":" << i << ',';
+        meta_stream << "\"steps_file\":\"" << steps_file_path << "\",";
+        meta_stream << "\"num_moves\":" << num_moves << ',';
+        meta_stream << "\"score\":" << final_game_score << ',';
+        meta_stream << "\"max_tile\":" << final_max_tile << ',';
+        meta_stream << "\"max_rank\":" << final_max_rank << ',';
+        meta_stream << "\"sum_tile\":" << final_sum_tile << ',';
+        meta_stream << "\"seconds\":" << FormatFloat(seconds);
+        meta_stream << '}';
+      }
+    }
+
+    if (options.progress_interval > 0 &&
+        ((i + 1) % options.progress_interval) == 0) {
+      fprintf(stderr,
+              "[progress] %d/%d games complete (%.1f%%), total moves %lld\n",
+              i + 1, options.iterations,
+              options.iterations ? (100.0 * (i + 1) / options.iterations) : 0.0,
+              total_moves_logged);
+      fflush(stderr);
+    }
+
+    if (options.verbose && !options.quiet) Node::cache.ShowStats();
+    if (!options.quiet) fflush(stdout);
   }
   return 0;
 }
