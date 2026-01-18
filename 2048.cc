@@ -12,11 +12,14 @@
 #include <fstream>
 #include <functional>
 #include <iomanip>
+#include <new>
 #include <set>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <zlib.h>
 
 #include "node.h"
 #include "plan.h"
@@ -165,6 +168,85 @@ std::string FormatFloat(double value, int precision = 6) {
   oss << std::setprecision(precision) << value;
   return oss.str();
 }
+
+class StepLogger {
+ public:
+  StepLogger() = default;
+  ~StepLogger() { Close(); }
+
+  bool Open(const std::string& path, bool gzip) {
+    Close();
+    gzip_ = gzip;
+    path_ = path;
+    buffer_.clear();
+    buffer_.shrink_to_fit();
+    if (gzip_) {
+      file_gz_ = gzopen(path.c_str(), "wb");
+      if (!file_gz_) return false;
+    } else {
+      file_stream_.open(path.c_str(),
+                        std::ios::out | std::ios::trunc | std::ios::binary);
+      if (!file_stream_.is_open()) return false;
+    }
+    is_open_ = true;
+    return true;
+  }
+
+  bool WriteLine(const std::string& line) {
+    if (!is_open_) return false;
+    try {
+      buffer_.append(line);
+      buffer_.push_back('\n');
+    } catch (const std::bad_alloc&) {
+      return false;
+    }
+    return true;
+  }
+
+  bool Close() {
+    if (!is_open_) {
+      buffer_.clear();
+      buffer_.shrink_to_fit();
+      path_.clear();
+      return true;
+    }
+    bool ok = true;
+    if (gzip_) {
+      if (file_gz_) {
+        if (!buffer_.empty()) {
+          const auto len = static_cast<int>(buffer_.size());
+          if (gzwrite(file_gz_, buffer_.data(), len) != len) ok = false;
+        }
+        if (gzclose(file_gz_) != Z_OK) ok = false;
+        file_gz_ = nullptr;
+      }
+    } else {
+      if (file_stream_.is_open()) {
+        if (!buffer_.empty()) {
+          file_stream_.write(buffer_.data(), buffer_.size());
+          if (!file_stream_) ok = false;
+        }
+        file_stream_.close();
+        if (!file_stream_) ok = false;
+      }
+    }
+    is_open_ = false;
+    buffer_.clear();
+    std::string().swap(buffer_);
+    path_.clear();
+    return ok;
+  }
+
+  const std::string& Path() const { return path_; }
+
+ private:
+  bool gzip_ = false;
+  bool is_open_ = false;
+  gzFile file_gz_ = nullptr;
+  std::ofstream file_stream_;
+  std::string buffer_;
+  std::string path_;
+};
 
 Valuation SuggestMove(Node& n, int* m, bool lookup_only = false,
                       int move_scores[4] = nullptr) {
@@ -420,9 +502,10 @@ int main(int argc, char* argv[]) {
   options.UpdateMinProbFromDepth();
   char* log_file = nullptr;
   const char* json_log_path = nullptr;
+  bool gzip_json_logging = false;
   int server_port = 0;
   int c;
-  while ((c = getopt(argc, argv, "d:i:p:s:vIL:O:P:R:S:TJ:qF:")) != -1) {
+  while ((c = getopt(argc, argv, "d:i:p:s:vIL:O:P:R:S:TJ:qF:Z")) != -1) {
     switch (c) {
       case 'd':
         options.max_depth = atoi(optarg);
@@ -469,6 +552,9 @@ int main(int argc, char* argv[]) {
         break;
       case 'F':
         options.progress_interval = atoi(optarg);
+        break;
+      case 'Z':
+        gzip_json_logging = true;
         break;
     }
   }
@@ -528,22 +614,24 @@ int main(int argc, char* argv[]) {
     timeval start, finish;
     gettimeofday(&start, NULL);
 
-    std::ofstream step_log_stream;
+    StepLogger step_logger;
     std::string game_file_prefix;
     std::string steps_file_path;
     bool step_log_ready = false;
+    bool step_log_success = false;
     if (enable_json_logging) {
       std::ostringstream path_builder;
       path_builder << json_base_path << "_game" << std::setfill('0')
                    << std::setw(6) << i;
       game_file_prefix = path_builder.str();
-      steps_file_path = game_file_prefix + ".jsonl";
-      step_log_stream.open(steps_file_path, std::ios::out | std::ios::trunc);
-      if (!step_log_stream) {
+      steps_file_path =
+          game_file_prefix + (gzip_json_logging ? ".jsonl.gz" : ".jsonl");
+      if (!step_logger.Open(steps_file_path, gzip_json_logging)) {
         fprintf(stderr, "Failed to open JSONL step log %s\n",
                 steps_file_path.c_str());
       } else {
         step_log_ready = true;
+        step_log_success = true;
       }
     }
 
@@ -586,12 +674,9 @@ int main(int argc, char* argv[]) {
         std::ostringstream line;
         line << '{';
         line << "\"seed\":" << options.seed + i << ',';
-        line << "\"depth\":" << options.max_depth << ',';
-        line << "\"game_index\":" << i << ',';
         line << "\"step_index\":" << step_index << ',';
         line << "\"max_rank\":" << max_rank << ',';
         line << "\"move\":\"" << Board::move_names[m] << "\",";
-        line << "\"move_index\":" << m << ',';
         line << "\"valuation_type\":\"" << ValuationTypeName(valuation.type)
              << "\",";
         line << "\"valuation\":" << FormatFloat(prob) << ',';
@@ -616,7 +701,12 @@ int main(int argc, char* argv[]) {
         }
         line << "}";
         line << '}';
-        step_log_stream << line.str() << '\n';
+        if (!step_logger.WriteLine(line.str())) {
+          fprintf(stderr, "Failed to write JSONL step log %s\n",
+                  steps_file_path.c_str());
+          step_log_ready = false;
+          step_log_success = false;
+        }
       }
 
       if (options.interactive) num_moves -= InteractivePlay(&n, &m, prob);
@@ -668,26 +758,32 @@ int main(int argc, char* argv[]) {
       puts("");
     }
 
-    if (step_log_ready) {
-      step_log_stream.close();
-      std::ofstream meta_stream(game_file_prefix + ".meta.json",
-                                std::ios::out | std::ios::trunc);
-      if (!meta_stream) {
-        fprintf(stderr, "Failed to write metadata for %s\n",
-                game_file_prefix.c_str());
-      } else {
-        meta_stream << '{';
-        meta_stream << "\"seed\":" << options.seed + i << ',';
-        meta_stream << "\"depth\":" << options.max_depth << ',';
-        meta_stream << "\"game_index\":" << i << ',';
-        meta_stream << "\"steps_file\":\"" << steps_file_path << "\",";
-        meta_stream << "\"num_moves\":" << num_moves << ',';
-        meta_stream << "\"score\":" << final_game_score << ',';
-        meta_stream << "\"max_tile\":" << final_max_tile << ',';
-        meta_stream << "\"max_rank\":" << final_max_rank << ',';
-        meta_stream << "\"sum_tile\":" << final_sum_tile << ',';
-        meta_stream << "\"seconds\":" << FormatFloat(seconds);
-        meta_stream << '}';
+    if (enable_json_logging) {
+      if (!step_logger.Close()) {
+        fprintf(stderr, "Failed to finalize JSONL step log %s\n",
+                steps_file_path.c_str());
+        step_log_success = false;
+      }
+      if (step_log_success) {
+        std::ofstream meta_stream(game_file_prefix + ".meta.json",
+                                  std::ios::out | std::ios::trunc);
+        if (!meta_stream) {
+          fprintf(stderr, "Failed to write metadata for %s\n",
+                  game_file_prefix.c_str());
+        } else {
+          meta_stream << '{';
+          meta_stream << "\"seed\":" << options.seed + i << ',';
+          meta_stream << "\"depth\":" << options.max_depth << ',';
+          meta_stream << "\"game_index\":" << i << ',';
+          meta_stream << "\"steps_file\":\"" << steps_file_path << "\",";
+          meta_stream << "\"num_moves\":" << num_moves << ',';
+          meta_stream << "\"score\":" << final_game_score << ',';
+          meta_stream << "\"max_tile\":" << final_max_tile << ',';
+          meta_stream << "\"max_rank\":" << final_max_rank << ',';
+          meta_stream << "\"sum_tile\":" << final_sum_tile << ',';
+          meta_stream << "\"seconds\":" << FormatFloat(seconds);
+          meta_stream << '}';
+        }
       }
     }
 

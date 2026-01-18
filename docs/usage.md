@@ -42,6 +42,8 @@ Key flags parsed in `2048.cc:389`:
 - `-J <prefix>` – log structured data under `<prefix>_gameNNNNNN`: each game
   gets its own step-level `.jsonl` (one move per line) plus a matching
   `.meta.json` summary.
+- `-Z` – when used with `-J`, gzip each game's `.jsonl` payload on close,
+  producing `.jsonl.gz` files while leaving metadata plain JSON.
 - `-F <games>` – emit a progress message every `<games>` completed (default 100);
   set to 0 to silence progress updates.
 - `-q` – quiet mode; suppresses the usual board dumps and progress summaries so
@@ -67,8 +69,10 @@ scripts/run_selfplay.sh -n 8 -g 200 -d 5 -o selfplay_logs/depth5_batch1
 - `-o` places the per-game `.jsonl` and `.meta.json` outputs in the given
   directory; file names encode the worker, seed, and game index for easy
   bookkeeping.
-- `-s` sets the base seed (optional). Seeds are spaced by `g` so workers never
-  collide. Add `-z` to gzip each `.jsonl` file after its worker exits.
+- `-s` overrides the randomized base seed (optional). When omitted the script
+  draws a high-entropy base value and reserves a unique block of `g` seeds per
+  worker, so concurrent runs never collide. Add `-z` to write each game's `.jsonl` as a gzip-compressed
+  `.jsonl.gz` while keeping the accompanying `.meta.json` files uncompressed.
 - Each worker still prints a brief progress heartbeat (default every 100 games)
   to `stderr` so long runs remain visible even in `-q` mode; tune it with `-F`.
 
@@ -81,12 +85,9 @@ Example step (prettified for clarity):
 ```json
 {
   "seed": 123456789,
-  "depth": 5,
-  "game_index": 0,
   "step_index": 117,
   "max_rank": 12,
   "move": "left",
-  "move_index": 1,
   "valuation_type": "tuple11",
   "valuation": 0.998524,
   "board": [
@@ -103,6 +104,11 @@ Example step (prettified for clarity):
   }
 }
 ```
+
+Valuation sources:
+- tuple10/tuple11 lookup tables emit probabilities in [0, 1).
+- search valuations come from depth-limited expectimax; the JSON log stores `value/1000`, so numbers can exceed 1.0 and even go negative when the position is bad.
+- block_plan and line_plan heuristics return probabilities on the same scale as tuple lookups.
 
 Corresponding metadata:
 
