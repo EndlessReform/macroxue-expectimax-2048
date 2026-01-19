@@ -40,6 +40,27 @@ class Node : public Board {
   Node() = default;
   Node(int layout[N][N]) : Board(layout) {}
 
+  struct SearchStats {
+    long long move_nodes = 0;
+    long long tile_nodes = 0;
+    long long tile_branches = 0;
+    long long eval_calls = 0;
+    long long prune_score = 0;
+    long long prune_depth = 0;
+    long long prune_prob = 0;
+    long long cache_lookups = 0;
+    long long cache_hits = 0;
+    long long cache_updates = 0;
+    long long cache_collisions = 0;
+    int max_move_depth = 0;
+  };
+
+  static void ResetSearchStats() {
+    search_stats = SearchStats{};
+  }
+
+  static SearchStats GetSearchStats() { return search_stats; }
+
   void Prefill(int max_rank) {
     for (int y = 0; y < N; ++y)
       for (int x = 0; x < N; ++x) board[x][y] = 1;
@@ -171,9 +192,18 @@ class Node : public Board {
   }
 
   int TryAllTiles(int depth, float prob) {
+    ++search_stats.tile_nodes;
+    ++search_stats.eval_calls;
     int score = Evaluate();
-    if (score < pass_score || depth < 0 || prob < options.min_prob)
+    bool prune_score = score < pass_score;
+    bool prune_depth = depth < 0;
+    bool prune_prob = prob < options.min_prob;
+    if (prune_score || prune_depth || prune_prob) {
+      if (prune_score) ++search_stats.prune_score;
+      if (prune_depth) ++search_stats.prune_depth;
+      if (prune_prob) ++search_stats.prune_prob;
       return score;
+    }
 
     unsigned long long compact_board = 0;
     int empty_tiles = 0;
@@ -194,8 +224,10 @@ class Node : public Board {
         if (board[x][y]) continue;
 
         board[x][y] = 1;
+        ++search_stats.tile_branches;
         total_score += 0.9 * TryAllMoves(depth, tile2_prob);
         board[x][y] = 2;
+        ++search_stats.tile_branches;
         total_score += 0.1 * TryAllMoves(depth, tile4_prob);
         board[x][y] = 0;
       }
@@ -206,6 +238,9 @@ class Node : public Board {
 
   int TryAllMoves(int depth, float prob, int* best_move = nullptr,
                   int move_scores[4] = nullptr) {
+    ++search_stats.move_nodes;
+    int ply = search_root_depth - depth;
+    if (ply > search_stats.max_move_depth) search_stats.max_move_depth = ply;
     int best_score = game_over_score;
     if (move_scores) {
       for (int i = 0; i < 4; ++i) move_scores[i] = game_over_score;
@@ -226,6 +261,7 @@ class Node : public Board {
   }
 
   int Search(int depth, int* best_move, int move_scores[4] = nullptr) {
+    search_root_depth = depth;
     int max_tile_score = TileScore(MaxRank());
     int score = Evaluate();
     if (options.tuple_moves) {
@@ -254,6 +290,7 @@ class Node : public Board {
 
   static void BuildScoreMap();
   static Cache cache;
+  static SearchStats search_stats;
 
  private:
   struct Scores {
@@ -267,11 +304,14 @@ class Node : public Board {
   int pass_score;
   int game_over_score;
   bool skip_cache;
+  static int search_root_depth;
 };
 
 // static
 Node::Scores Node::score_map[1 << 20];
 Cache Node::cache;
+Node::SearchStats Node::search_stats;
+int Node::search_root_depth = 0;
 
 // static
 void Node::BuildScoreMap() {

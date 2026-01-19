@@ -248,8 +248,16 @@ class StepLogger {
   std::string path_;
 };
 
+struct LastSearchMetrics {
+  bool used = false;
+  Node::SearchStats stats;
+};
+
+static LastSearchMetrics last_search_metrics;
+
 Valuation SuggestMove(Node& n, int* m, bool lookup_only = false,
                       int move_scores[4] = nullptr) {
+  last_search_metrics.used = false;
   if (tuple11) {
     auto prob = tuple11->SuggestMove(n, m);
 #ifdef BIG_TUPLES
@@ -275,10 +283,26 @@ Valuation SuggestMove(Node& n, int* m, bool lookup_only = false,
     if (prob > 0) return {Valuation::kBlockPlan, prob};
   }
   if (lookup_only) {
+    last_search_metrics.used = false;
     return {Valuation::kSearch, 0};
   }
+  last_search_metrics.used = true;
+  Node::ResetSearchStats();
+  long long lookups_before = Node::cache.LookupCount();
+  long long hits_before = Node::cache.HitCount();
+  long long updates_before = Node::cache.UpdateCount();
+  long long collisions_before = Node::cache.CollisionCount();
+  auto value = (float)n.Search(options.max_depth, m, move_scores);
+  last_search_metrics.stats = Node::GetSearchStats();
+  last_search_metrics.stats.cache_lookups =
+      Node::cache.LookupCount() - lookups_before;
+  last_search_metrics.stats.cache_hits = Node::cache.HitCount() - hits_before;
+  last_search_metrics.stats.cache_updates =
+      Node::cache.UpdateCount() - updates_before;
+  last_search_metrics.stats.cache_collisions =
+      Node::cache.CollisionCount() - collisions_before;
   return {Valuation::kSearch,
-          (float)n.Search(options.max_depth, m, move_scores)};
+          value};
 }
 
 float LookupTuple(Node &n, Valuation::Type type) {
@@ -504,8 +528,9 @@ int main(int argc, char* argv[]) {
   const char* json_log_path = nullptr;
   bool gzip_json_logging = false;
   int server_port = 0;
+  bool print_search_metrics = false;
   int c;
-  while ((c = getopt(argc, argv, "d:i:p:s:vIL:O:P:R:S:TJ:qF:Z")) != -1) {
+  while ((c = getopt(argc, argv, "d:i:p:s:vIL:O:P:R:S:TJ:qF:ZM")) != -1) {
     switch (c) {
       case 'd':
         options.max_depth = atoi(optarg);
@@ -556,6 +581,9 @@ int main(int argc, char* argv[]) {
       case 'Z':
         gzip_json_logging = true;
         break;
+      case 'M':
+        print_search_metrics = true;
+        break;
     }
   }
   if (optind < argc) options.seed = atoi(argv[optind]);
@@ -595,6 +623,8 @@ int main(int argc, char* argv[]) {
   for (int i = 0; i < options.iterations; ++i) {
     srand(options.seed + i);
     Node::cache.Clear();
+    Node::cache.ResetStats();
+    Node::ResetSearchStats();
 #if 1
     Node n;
     if (options.prefill_rank) {
@@ -699,6 +729,46 @@ int main(int argc, char* argv[]) {
           else
             line << "null";
         }
+        line << "},";
+        line << "\"search\":{";
+        line << "\"used\":" << (last_search_metrics.used ? "true" : "false")
+             << ",";
+        if (last_search_metrics.used) {
+          const auto& s = last_search_metrics.stats;
+          long long total_nodes = s.move_nodes + s.tile_nodes;
+          double hit_rate =
+              s.cache_lookups ? (double)s.cache_hits * 100.0 / s.cache_lookups
+                              : 0.0;
+          line << "\"total_nodes\":" << total_nodes << ",";
+          line << "\"move_nodes\":" << s.move_nodes << ",";
+          line << "\"tile_nodes\":" << s.tile_nodes << ",";
+          line << "\"tile_branches\":" << s.tile_branches << ",";
+          line << "\"eval_calls\":" << s.eval_calls << ",";
+          line << "\"prune_score\":" << s.prune_score << ",";
+          line << "\"prune_depth\":" << s.prune_depth << ",";
+          line << "\"prune_prob\":" << s.prune_prob << ",";
+          line << "\"cache_lookups\":" << s.cache_lookups << ",";
+          line << "\"cache_hits\":" << s.cache_hits << ",";
+          line << "\"cache_updates\":" << s.cache_updates << ",";
+          line << "\"cache_collisions\":" << s.cache_collisions << ",";
+          line << "\"cache_hit_rate\":" << FormatFloat(hit_rate) << ",";
+          line << "\"max_move_depth\":" << s.max_move_depth;
+        } else {
+          line << "\"total_nodes\":null,";
+          line << "\"move_nodes\":null,";
+          line << "\"tile_nodes\":null,";
+          line << "\"tile_branches\":null,";
+          line << "\"eval_calls\":null,";
+          line << "\"prune_score\":null,";
+          line << "\"prune_depth\":null,";
+          line << "\"prune_prob\":null,";
+          line << "\"cache_lookups\":null,";
+          line << "\"cache_hits\":null,";
+          line << "\"cache_updates\":null,";
+          line << "\"cache_collisions\":null,";
+          line << "\"cache_hit_rate\":null,";
+          line << "\"max_move_depth\":null";
+        }
         line << "}";
         line << '}';
         if (!step_logger.WriteLine(line.str())) {
@@ -739,6 +809,23 @@ int main(int argc, char* argv[]) {
     if (!options.quiet) {
       printf("game# %d moves %d seconds %.1f moves/s %.1f\n", options.seed + i,
              num_moves, seconds, num_moves / seconds);
+    }
+    if (print_search_metrics) {
+      auto stats = Node::GetSearchStats();
+      long long total_nodes = stats.move_nodes + stats.tile_nodes;
+      double nodes_per_move =
+          num_moves ? (double)total_nodes / num_moves : 0.0;
+      long long lookups = Node::cache.LookupCount();
+      long long hits = Node::cache.HitCount();
+      double hit_rate = lookups ? (double)hits * 100.0 / lookups : 0.0;
+      printf("search_metrics game=%d moves=%d total_nodes=%lld nodes_per_move=%.1f "
+             "move_nodes=%lld tile_nodes=%lld tile_branches=%lld "
+             "prune_score=%lld prune_depth=%lld prune_prob=%lld "
+             "cache_lookups=%lld cache_hits=%lld cache_hit_rate=%.1f%%\n",
+             options.seed + i, num_moves, total_nodes, nodes_per_move,
+             stats.move_nodes, stats.tile_nodes, stats.tile_branches,
+             stats.prune_score, stats.prune_depth, stats.prune_prob,
+             lookups, hits, hit_rate);
     }
 
     int final_game_score = n.GameScore();

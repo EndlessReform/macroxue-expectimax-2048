@@ -1,0 +1,10 @@
+# Generated self-play logs
+selfplay_logs/
+search_metrics_logs/
+tuple_moves.*
+
+# Build output
+2048
+2048b
+array_test
+board_test

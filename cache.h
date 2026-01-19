@@ -33,6 +33,18 @@ class Cache {
     for (int i = 0; i < kSize; ++i) entries[i].board = 0;
   }
 
+  void ResetStats() {
+    lookup_count = 0;
+    hit_count = 0;
+    update_count = 0;
+    collision_count = 0;
+  }
+
+  long long LookupCount() const { return lookup_count; }
+  long long HitCount() const { return hit_count; }
+  long long UpdateCount() const { return update_count; }
+  long long CollisionCount() const { return collision_count; }
+
   bool Lookup(unsigned long long board, float prob, int depth,
               int* score) const {
     ++lookup_count;
