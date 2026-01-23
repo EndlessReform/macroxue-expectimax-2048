@@ -27,6 +27,7 @@ struct Options {
   float optimality = 0.9;
   int prefill_rank = 0;
   int max_rank = 0;
+  int max_moves = 0;
   bool tuple_moves = true;
   double save_threshold = 0.1;
   bool quiet = false;

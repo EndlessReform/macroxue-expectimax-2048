@@ -12,8 +12,12 @@ Options:
   -o <dir>        Directory for JSONL logs (default: selfplay_logs)
   -e <path>       Engine executable to run (default: ./2048b if present, otherwise ./2048)
   -s <seed>       Base seed for reproducibility (default: current epoch seconds)
+  -m <steps>      Stop each game after N moves (optional)
+  -t <tile>       Stop once the given tile value is reached (optional, e.g. 2048)
   -z              Compress logs with gzip (adds .gz suffix)
   -h              Show this help message
+  --max-step N    Long form of -m
+  --max-tile N    Long form of -t
 
 Each worker emits structured JSONL via the engine's -J flag. Seeds are offset
 by the number of games per worker so workers do not overlap their sequences.
@@ -34,8 +38,43 @@ base_seed=""
 base_seed_supplied=0
 engine=""
 workers="$default_workers"
+max_steps=""
+max_tile=""
+max_rank=""
 
-while getopts ":n:g:d:o:e:s:zh" opt; do
+args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --max-step)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --max-step requires a value" >&2
+        exit 1
+      fi
+      args+=(-m "$2")
+      shift 2
+      ;;
+    --max-tile)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --max-tile requires a value" >&2
+        exit 1
+      fi
+      args+=(-t "$2")
+      shift 2
+      ;;
+    --help)
+      args+=(-h)
+      shift
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+set -- "${args[@]}"
+
+while getopts ":n:g:d:o:e:s:m:t:zh" opt; do
   case "$opt" in
     n)
       workers="$OPTARG"
@@ -55,6 +94,12 @@ while getopts ":n:g:d:o:e:s:zh" opt; do
     s)
       base_seed="$OPTARG"
       base_seed_supplied=1
+      ;;
+    m)
+      max_steps="$OPTARG"
+      ;;
+    t)
+      max_tile="$OPTARG"
       ;;
     z)
       compress=1
@@ -92,6 +137,31 @@ fi
 if (( games_per_worker <= 0 )); then
   echo "error: number of games per worker must be positive" >&2
   exit 1
+fi
+
+if [[ -n "$max_steps" ]]; then
+  if [[ ! "$max_steps" =~ ^[0-9]+$ ]] || (( max_steps <= 0 )); then
+    echo "error: max steps must be a positive integer" >&2
+    exit 1
+  fi
+fi
+
+if [[ -n "$max_tile" ]]; then
+  if [[ ! "$max_tile" =~ ^[0-9]+$ ]] || (( max_tile < 2 )); then
+    echo "error: max tile must be an integer >= 2 (e.g. 2048)" >&2
+    exit 1
+  fi
+  if (( (max_tile & (max_tile - 1)) != 0 )); then
+    echo "error: max tile must be a power of two (e.g. 512, 1024, 2048)" >&2
+    exit 1
+  fi
+  tile_value=$max_tile
+  tile_rank=0
+  while (( tile_value > 1 )); do
+    tile_value=$(( tile_value / 2 ))
+    tile_rank=$(( tile_rank + 1 ))
+  done
+  max_rank="$tile_rank"
 fi
 
 total_games=$(( workers * games_per_worker ))
@@ -180,6 +250,12 @@ for idx in $(seq 0 $(( workers - 1 ))); do
   (
     set -e
     cmd=("$engine" -q -d "$depth" -i "$games_per_worker" -J "$base_path")
+    if [[ -n "$max_steps" ]]; then
+      cmd+=( -m "$max_steps" )
+    fi
+    if [[ -n "$max_rank" ]]; then
+      cmd+=( -R "$max_rank" )
+    fi
     if (( compress )); then
       cmd+=( -Z )
     fi

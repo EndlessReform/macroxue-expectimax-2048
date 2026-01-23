@@ -33,6 +33,7 @@ Key flags parsed in `2048.cc:389`:
 - `-d <depth>` – maximum search depth (`options.max_depth`). Also adjusts the
   minimum probability via `Options::UpdateMinProbFromDepth`.
 - `-i <games>` – number of games to run in batch (`options.iterations`).
+- `-m <moves>` – stop each game after the given number of moves (`options.max_moves`).
 - `-p <prob>` – override the minimum branch probability (`options.min_prob`).
 - `-s <threshold>` – save threshold for tuple tables (`options.save_threshold`).
 - `-v` – verbose mode; prints every board and chosen move.
@@ -42,6 +43,8 @@ Key flags parsed in `2048.cc:389`:
 - `-J <prefix>` – log structured data under `<prefix>_gameNNNNNN`: each game
   gets its own step-level `.jsonl` (one move per line) plus a matching
   `.meta.json` summary.
+- `-R <max-rank>` – stop the game once the max tile rank is reached (tile value
+  = `2^rank`).
 - `-Z` – when used with `-J`, gzip each game's `.jsonl` payload on close,
   producing `.jsonl.gz` files while leaving metadata plain JSON.
 - `-F <games>` – emit a progress message every `<games>` completed (default 100);
@@ -69,6 +72,9 @@ scripts/run_selfplay.sh -n 8 -g 200 -d 5 -o selfplay_logs/depth5_batch1
 - `-o` places the per-game `.jsonl` and `.meta.json` outputs in the given
   directory; file names encode the worker, seed, and game index for easy
   bookkeeping.
+- `-m` stops each game after the given move count (passes `-m` to the engine).
+- `-t` stops each game once the given tile value is reached (e.g. 2048); it
+  passes the corresponding max-rank to the engine.
 - `-s` overrides the randomized base seed (optional). When omitted the script
   draws a high-entropy base value and reserves a unique block of `g` seeds per
   worker, so concurrent runs never collide. Add `-z` to write each game's `.jsonl` as a gzip-compressed

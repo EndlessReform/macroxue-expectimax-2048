@@ -530,7 +530,7 @@ int main(int argc, char* argv[]) {
   int server_port = 0;
   bool print_search_metrics = false;
   int c;
-  while ((c = getopt(argc, argv, "d:i:p:s:vIL:O:P:R:S:TJ:qF:ZM")) != -1) {
+  while ((c = getopt(argc, argv, "d:i:m:p:s:vIL:O:P:R:S:TJ:qF:ZM")) != -1) {
     switch (c) {
       case 'd':
         options.max_depth = atoi(optarg);
@@ -538,6 +538,9 @@ int main(int argc, char* argv[]) {
         break;
       case 'i':
         options.iterations = atoi(optarg);
+        break;
+      case 'm':
+        options.max_moves = atoi(optarg);
         break;
       case 'p':
         options.min_prob = atof(optarg);
@@ -588,6 +591,10 @@ int main(int argc, char* argv[]) {
   }
   if (optind < argc) options.seed = atoi(argv[optind]);
   srand(options.seed);
+  if (options.max_moves < 0) {
+    fprintf(stderr, "max moves must be non-negative\n");
+    return 1;
+  }
 
   std::string json_base_path;
   bool enable_json_logging = false;
@@ -668,6 +675,7 @@ int main(int argc, char* argv[]) {
     int num_moves = 0;
     int prev_max_rank = 0;
     do {
+      if (options.max_moves > 0 && num_moves >= options.max_moves) break;
       if (!options.quiet && (options.verbose || options.interactive)) n.Show();
 
       int max_rank = n.MaxRank();
